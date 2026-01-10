@@ -1,0 +1,67 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: offer-eligibility-db
+    environment:
+      POSTGRES_USER: ${DATABASE_USER:-user}
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:-password}
+      POSTGRES_DB: ${DATABASE_NAME:-offer-eligibility}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DATABASE_USER:-user} -d ${DATABASE_NAME:-offer-eligibility}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  migrate:
+    image: migrate/migrate:v4.17.0
+    container_name: offer-eligibility-migrate
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./internal/repository/db/migrations:/migrations
+    command:
+      - "-path=/migrations"
+      - "-database=postgres://${DATABASE_USER:-user}:${DATABASE_PASSWORD:-password}@postgres:5432/${DATABASE_NAME:-offer-eligibility}?sslmode=disable"
+      - "up"
+
+  seed:
+    image: postgres:16-alpine
+    container_name: offer-eligibility-seed
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGUSER: ${DATABASE_USER:-user}
+      PGPASSWORD: ${DATABASE_PASSWORD:-password}
+      PGDATABASE: ${DATABASE_NAME:-offer-eligibility}
+    volumes:
+      - ./internal/repository/db/seeds:/seeds
+    command: >
+      sh -c "for f in /seeds/*.sql; do psql -f $$f; done"
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: offer-eligibility-api
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_USER: ${DATABASE_USER:-user}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:-password}
+      DATABASE_NAME: ${DATABASE_NAME:-offer-eligibility}
+    ports:
+      - "${SERVER_PORT:-8080}:${SERVER_PORT:-8080}"
+
+volumes:
+  postgres_data:
