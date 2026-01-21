@@ -62,7 +62,7 @@ func (r Repo) GetEligibleOffers(ctx context.Context, req core.GetEligibleOffersR
 	}
 	now := *req.Now
 
-	mccFilter := SELECT(Int(1)).FROM(OffersMccs).WHERE(AND(OffersMccs.OfferID.EQ(Offers.ID), OffersMccs.Mcc.EQ(Transactions.Mcc)))
+	reasonExpr := CONCAT(String(">= min_txn_count in last "), Offers.LookbackDays, String(" days")).AS("reason")
 
 	transactionsFilter := SELECT(Int(1)).
 		FROM(Transactions).
@@ -77,22 +77,28 @@ func (r Repo) GetEligibleOffers(ctx context.Context, req core.GetEligibleOffersR
 		GROUP_BY(Transactions.UserID).
 		HAVING(COUNT(STAR).GT_EQ(Offers.MinTransactions))
 
-	stmt := SELECT(Offers.ID.AS("offer_id"), CONCAT(String(">= min_txn_count in last "), Offers.LookbackDays, String(" days")).AS("reason")).
+	activeOffersFilter := AND(
+		Offers.Active.EQ(Bool(true)),
+		Offers.StartDate.LT_EQ(TimestampzT(now)),
+		Offers.EndDate.GT_EQ(TimestampzT(now)),
+		EXISTS(transactionsFilter),
+	)
+
+	merchantBranch := SELECT(Offers.ID.AS("offer_id"), reasonExpr).
+		DISTINCT().
+		FROM(Offers.INNER_JOIN(Transactions, Offers.MerchantID.EQ(Transactions.MerchantID))).
+		WHERE(activeOffersFilter)
+
+	mccBranch := SELECT(Offers.ID.AS("offer_id"), reasonExpr).
+		DISTINCT().
 		FROM(
-			Offers.INNER_JOIN(
-				Transactions,
-				OR(Offers.MerchantID.EQ(Transactions.MerchantID), EXISTS(mccFilter)),
-			),
+			Offers.
+				INNER_JOIN(OffersMccs, OffersMccs.OfferID.EQ(Offers.ID)).
+				INNER_JOIN(Transactions, OffersMccs.Mcc.EQ(Transactions.Mcc)),
 		).
-		WHERE(
-			AND(
-				Offers.Active.EQ(Bool(true)),
-				Offers.StartDate.LT_EQ(TimestampzT(now)),
-				Offers.EndDate.GT_EQ(TimestampzT(now)),
-				EXISTS(transactionsFilter),
-			),
-		).
-		GROUP_BY(Offers.ID)
+		WHERE(activeOffersFilter)
+
+	stmt := UNION(merchantBranch, mccBranch)
 
 	var dest []struct {
 		OfferID string `sql:"offer_id"`
