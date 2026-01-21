@@ -62,41 +62,51 @@ func (r Repo) GetEligibleOffers(ctx context.Context, req core.GetEligibleOffersR
 	}
 	now := *req.Now
 
+	userIDExpr := CAST(String(req.UserID)).AS_UUID()
 	reasonExpr := CONCAT(String(">= min_txn_count in last "), Offers.LookbackDays, String(" days")).AS("reason")
 
-	transactionsFilter := SELECT(Int(1)).
-		FROM(Transactions).
-		WHERE(
-			AND(
-				Transactions.UserID.EQ(CAST(String(req.UserID)).AS_UUID()),
-				Transactions.ApprovedAt.GT_EQ(
-					TimestampzT(now).SUB(INTERVAL(1, DAY).MUL(IntExp(Offers.LookbackDays))),
-				),
-			),
-		).
-		GROUP_BY(Transactions.UserID).
-		HAVING(COUNT(STAR).GT_EQ(Offers.MinTransactions))
+	userTransactionsFilter := AND(
+		Transactions.UserID.EQ(userIDExpr),
+		Transactions.ApprovedAt.GT_EQ(
+			TimestampzT(now).SUB(INTERVAL(1, DAY).MUL(IntExp(Offers.LookbackDays))),
+		),
+	)
 
 	activeOffersFilter := AND(
 		Offers.Active.EQ(Bool(true)),
 		Offers.StartDate.LT_EQ(TimestampzT(now)),
 		Offers.EndDate.GT_EQ(TimestampzT(now)),
-		EXISTS(transactionsFilter),
 	)
 
 	merchantBranch := SELECT(Offers.ID.AS("offer_id"), reasonExpr).
-		DISTINCT().
-		FROM(Offers.INNER_JOIN(Transactions, Offers.MerchantID.EQ(Transactions.MerchantID))).
-		WHERE(activeOffersFilter)
+		FROM(
+			Offers.INNER_JOIN(
+				Transactions,
+				AND(
+					Offers.MerchantID.EQ(Transactions.MerchantID),
+					userTransactionsFilter,
+				),
+			),
+		).
+		WHERE(activeOffersFilter).
+		GROUP_BY(Offers.ID, Offers.LookbackDays, Offers.MinTransactions).
+		HAVING(COUNT(STAR).GT_EQ(Offers.MinTransactions))
 
 	mccBranch := SELECT(Offers.ID.AS("offer_id"), reasonExpr).
-		DISTINCT().
 		FROM(
 			Offers.
 				INNER_JOIN(OffersMccs, OffersMccs.OfferID.EQ(Offers.ID)).
-				INNER_JOIN(Transactions, OffersMccs.Mcc.EQ(Transactions.Mcc)),
+				INNER_JOIN(
+					Transactions,
+					AND(
+						OffersMccs.Mcc.EQ(Transactions.Mcc),
+						userTransactionsFilter,
+					),
+				),
 		).
-		WHERE(activeOffersFilter)
+		WHERE(activeOffersFilter).
+		GROUP_BY(Offers.ID, Offers.LookbackDays, Offers.MinTransactions).
+		HAVING(COUNT(STAR).GT_EQ(Offers.MinTransactions))
 
 	stmt := UNION(merchantBranch, mccBranch)
 
